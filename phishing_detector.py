@@ -1,7 +1,7 @@
 """
 Phishing URL Detection System - Backend Server
 Created for ESP32-CAM Project
-With QR Code Decoding Support
+With QR Code Decoding via API
 """
 
 from flask import Flask, request, jsonify
@@ -9,13 +9,7 @@ import re
 from urllib.parse import urlparse
 import socket
 import base64
-from io import BytesIO
-try:
-    from PIL import Image
-    from pyzbar import pyzbar
-    QR_SUPPORT = True
-except ImportError:
-    QR_SUPPORT = False
+import requests
 
 app = Flask(__name__)
 
@@ -203,29 +197,21 @@ def check_url():
 def scan_qr():
     """
     API endpoint to decode QR code from image
-    Accepts: Base64 encoded image or multipart file upload
+    Uses external QR API (api.qrserver.com)
+    Accepts: Raw image data or base64
     Returns: JSON with decoded URL and analysis
     """
-    if not QR_SUPPORT:
-        return jsonify({
-            'status': 'error',
-            'message': 'QR decoding not supported (install PIL and pyzbar)'
-        }), 501
-    
     try:
         image_data = None
         
-        # Try to get image from different sources
+        # Get image data
         if request.is_json:
             data = request.get_json()
             if 'image' in data:
-                # Base64 encoded image
                 image_data = base64.b64decode(data['image'])
         elif 'image' in request.files:
-            # File upload
             image_data = request.files['image'].read()
         elif request.data:
-            # Raw binary data
             image_data = request.data
         
         if not image_data:
@@ -234,42 +220,59 @@ def scan_qr():
                 'message': 'No image data provided'
             }), 400
         
-        # Open image
-        image = Image.open(BytesIO(image_data))
-        
-        # Decode QR codes
-        qr_codes = pyzbar.decode(image)
-        
-        if not qr_codes:
+        # Use QR code API service
+        try:
+            # Send image to QR decoding API
+            api_url = "https://api.qrserver.com/v1/read-qr-code/"
+            files = {'file': ('qr.jpg', image_data, 'image/jpeg')}
+            
+            response = requests.post(api_url, files=files, timeout=15)
+            
+            if response.status_code == 200:
+                result = response.json()
+                
+                if result and len(result) > 0:
+                    qr_data = result[0].get('symbol', [{}])[0].get('data', '')
+                    
+                    if not qr_data:
+                        return jsonify({
+                            'status': 'success',
+                            'qr_found': False,
+                            'message': 'No QR code detected in image'
+                        })
+                    
+                    # Check if it's a URL
+                    if not any(x in qr_data.lower() for x in ['http', '.com', '.net', '.org', '.edu', 'www.']):
+                        return jsonify({
+                            'status': 'success',
+                            'qr_found': True,
+                            'qr_data': qr_data,
+                            'is_url': False,
+                            'message': 'QR code found but does not contain a URL'
+                        })
+                    
+                    # Analyze the URL
+                    analysis = detector.analyze_url(qr_data)
+                    
+                    return jsonify({
+                        'status': 'success',
+                        'qr_found': True,
+                        'qr_data': qr_data,
+                        'is_url': True,
+                        'analysis': analysis
+                    })
+            
             return jsonify({
                 'status': 'success',
                 'qr_found': False,
                 'message': 'No QR code detected in image'
             })
-        
-        # Get first QR code
-        qr_data = qr_codes[0].data.decode('utf-8')
-        
-        # Check if it's a URL
-        if not any(x in qr_data.lower() for x in ['http', '.com', '.net', '.org', '.edu', 'www.']):
+            
+        except requests.exceptions.RequestException as e:
             return jsonify({
-                'status': 'success',
-                'qr_found': True,
-                'qr_data': qr_data,
-                'is_url': False,
-                'message': 'QR code found but does not contain a URL'
-            })
-        
-        # Analyze the URL
-        analysis = detector.analyze_url(qr_data)
-        
-        return jsonify({
-            'status': 'success',
-            'qr_found': True,
-            'qr_data': qr_data,
-            'is_url': True,
-            'analysis': analysis
-        })
+                'status': 'error',
+                'message': f'QR decoding service unavailable: {str(e)}'
+            }), 503
         
     except Exception as e:
         return jsonify({
