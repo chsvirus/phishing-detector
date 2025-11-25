@@ -1,12 +1,21 @@
 """
 Phishing URL Detection System - Backend Server
 Created for ESP32-CAM Project
+With QR Code Decoding Support
 """
 
 from flask import Flask, request, jsonify
 import re
 from urllib.parse import urlparse
 import socket
+import base64
+from io import BytesIO
+try:
+    from PIL import Image
+    from pyzbar import pyzbar
+    QR_SUPPORT = True
+except ImportError:
+    QR_SUPPORT = False
 
 app = Flask(__name__)
 
@@ -189,6 +198,84 @@ def check_url():
     result = detector.analyze_url(url)
     
     return jsonify(result)
+
+@app.route('/api/scan', methods=['POST'])
+def scan_qr():
+    """
+    API endpoint to decode QR code from image
+    Accepts: Base64 encoded image or multipart file upload
+    Returns: JSON with decoded URL and analysis
+    """
+    if not QR_SUPPORT:
+        return jsonify({
+            'status': 'error',
+            'message': 'QR decoding not supported (install PIL and pyzbar)'
+        }), 501
+    
+    try:
+        image_data = None
+        
+        # Try to get image from different sources
+        if request.is_json:
+            data = request.get_json()
+            if 'image' in data:
+                # Base64 encoded image
+                image_data = base64.b64decode(data['image'])
+        elif 'image' in request.files:
+            # File upload
+            image_data = request.files['image'].read()
+        elif request.data:
+            # Raw binary data
+            image_data = request.data
+        
+        if not image_data:
+            return jsonify({
+                'status': 'error',
+                'message': 'No image data provided'
+            }), 400
+        
+        # Open image
+        image = Image.open(BytesIO(image_data))
+        
+        # Decode QR codes
+        qr_codes = pyzbar.decode(image)
+        
+        if not qr_codes:
+            return jsonify({
+                'status': 'success',
+                'qr_found': False,
+                'message': 'No QR code detected in image'
+            })
+        
+        # Get first QR code
+        qr_data = qr_codes[0].data.decode('utf-8')
+        
+        # Check if it's a URL
+        if not any(x in qr_data.lower() for x in ['http', '.com', '.net', '.org', '.edu', 'www.']):
+            return jsonify({
+                'status': 'success',
+                'qr_found': True,
+                'qr_data': qr_data,
+                'is_url': False,
+                'message': 'QR code found but does not contain a URL'
+            })
+        
+        # Analyze the URL
+        analysis = detector.analyze_url(qr_data)
+        
+        return jsonify({
+            'status': 'success',
+            'qr_found': True,
+            'qr_data': qr_data,
+            'is_url': True,
+            'analysis': analysis
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'message': f'Error processing image: {str(e)}'
+        }), 500
 
 def get_local_ip():
     """Get local IP address"""
